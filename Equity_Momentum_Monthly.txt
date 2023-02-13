@@ -1,0 +1,202 @@
+%matplotlib inline
+
+import zipline
+from zipline.api import order_target_percent, symbol, \
+    set_commission, set_slippage, schedule_function, \
+    date_rules, time_rules
+from datetime import date time
+import pytz
+import matplotlib.pyplot as plt 
+import pyfolio as py
+import pandas as pd 
+import numpy as np 
+from scipy import stats 
+from zipline.finance.commission import PerDollar 
+from zipline.finance.slippage import VolumeShareSlippage, FixedSlippage
+
+"""
+Model Setting
+"""
+initial_portfolio = 100000
+momentum_window = 125
+minimun_momentum = 40
+portfolio_size = 30
+vola_window = 20
+
+"""
+Commision and Slippage Settings 
+"""
+enable_commission = True 
+commission_pct = 0.001
+enable_slippage = True
+slippage_volume_limit = 0.025
+slippage_impact = 0.05
+
+"""
+Helper functions.
+"""
+def momentum_score(ts):
+"""
+    Input: Price time series.
+    Output: Annualized exponential regression slope,
+    multiplied by the R2
+"""
+
+# Make a list of consecutive numbers
+x = np.arange(len(ts))
+# Get logs
+log_ts = np.log(ts)
+# Calculate regression values
+slope, intercept, r_value, std_err = stats.linregress(x, log_ts)
+# Annualize percent 
+annualized_slope = (np.power(np.exp(slope), 252) - 1) * 100
+# Adjust for fitness 
+score = annualized_slope * (r_value ** 2)
+return score
+
+def volatility(ts):
+    return ts.pct_change().rolling(vola_window).std().iloc[-1]
+
+def output_progress(context):
+    """
+    Output some perfomance numbers during backtest run this code just print out the past month`s performance so that we have something to look at while the backtest runs.
+    """
+    # Get today`s date
+    today = zipline.api.get_datetime().date()
+    #Calculate percent difference since last month 
+    perf_pct = (context.portfolio_value / context.last_month) - 1
+    # Print perfomance, format as percent with two decimals.
+    print("{} - Last Month Result: {:.2%}".format(today, perf_pct))
+    # Remember today`s portfolio value for next month`s calculation
+    context.last_month = context.portfolio.portfolio_value 
+    
+"""
+Initialization and trading logic
+"""
+def initialize(context):
+    # Set commission and slippage.
+    if enable_commission:
+        comm_model = PerDollar(cost=commission_pct)
+    else: 
+        comm_model = PerDollar(cost=0.0)
+        set_commission(comm_model)
+    
+    if enable_slippage:
+        slippage_model=VolumeShareSlippage(Volume_limit=Slippage_volume_limit, price_impact = slippage_impact)
+    else:
+        slippage_model = FixedSlippage(spread=0.0)
+        set_slippage(slippage_model)
+    
+    #Used only for progress output.
+    contect.last_month = initial_portfolio
+
+    # Store index membership  (// I select my file //)
+    context.index_members = pd.readcsv('sp500.csv', index_col=0, parse_dates=[0])
+
+    # Schedule rebalance monthly.
+    schedule_function(
+        func=rebalance,
+        date_rule=date_rules.mont_start(),
+        time_rule=time_rules.market_open()
+    )
+
+def rebalance(context, data):
+    # Write some progress output during the backtest
+    output_progress(context)
+
+    # Ok, let`s fing which stock can be traded today 
+
+    # First, get today`s date
+    today = zipline.api.get_datetime()
+
+    # Second, get the index makeup for all days prior to today.
+    all_prior = context.index_members.loc[context.index_members.index < today]
+    
+    # Now let`s snag the first column of the last, i.e. latest, entry.
+    latest_day = all_prior.iloc[-1,0]
+
+    # Split the text string with tickers into a list 
+    list_of_tickers = lates_day.split(',')
+
+    # Finally, get the Zipline symbols for the tickers
+    today_universe = [sumbol(ticker) for ticker in list_of_tickers]
+
+    # There`s your daily universe. But we could of course have done this in one go 
+
+    """
+    # This line below does the same thing, using the same logic to fetch today`s stocks.
+    todays_universe = [symbol(ticker) for ticker in context.index_members.loc[context.index_members.index < today].iloc [-1,0].slipt(',')]
+    """
+    # Get historical data
+    hist = data.history(today_universe, "close", momentum_window, "1d")
+
+    # Make momentum ranking table
+    ranking_table = hist.apply(momentum_score).sort_values(ascending=False)
+
+    """
+    Sell logic
+
+    First we check if any existing position should be sold.
+    * Sell if stock is no longer part of index 
+    * Sell if stock has too low momentum value.
+    """
+
+    kept_positions = list(context.portfolio.positions.keys())
+    for security in context.portfolio.positions:
+        if (security not in todays_universe):
+            order_target_percent(security, 0.0)
+            kept_positions.remove(security)
+        elif ranking_table[security] < minimun_momentum:
+            order_target_percent(security, 0.0)
+            kept_positions.remove(security)
+    """
+    Stock Selections logic
+    Check how many stocks we are keeping from last month. Fill from top of ranking list, until we reach the desired total number of portfolio holding.
+    """
+
+    replacement_stocks = portfolio_size - len(kept_positions)
+    buy_list = ranking_table.loc[
+        ~ranking_table.index.isin(kept_posisitions)][:replacement_stocks]
+
+    new_portfolio = pd.concat(
+        (buy_list, ranking_table.loc[ranking_table.index.isin(kept_posisitions)])
+    )
+
+    """
+    Calculate inverse volatility for stocks, and make target position weights.
+    """
+    vola_table = hist[new_portfolio.index].apply(volatility)
+    inv_vola_table = 1 / vola_table
+    sum_inv_vola = np.sum(inv_vola_table)
+    vola_target_weights = inv_vola_table / sum_inv_vola
+
+    for security, rank in new_portfolio.iteritems():
+        weight = vola_target_weights[security]
+        if security in kept_posisitions:
+            order_target_percent(security, weight)
+        else:
+            if ranking_table[security] > minimum_momentum:
+                order_target_percent(security, weight)
+
+def analyze(context, perf):
+    perf['max'] = perf.portfolio_value.cummax()
+    perf['dd'] = (perf.portfolio_value / perf['max']) - 1
+    maxdd = perf['dd'].min()
+
+    ann_ret = (np.power((perf.portfolio_value.iloc[-1] / perf.portfolio_value.iloc[0]),(252 / len(perf))))
+
+    print("Annualized Return: {:.2%} Max Drawdon: {:.2%}". format(ann_ret, maxdd))
+    return
+
+start = datetime(1997, 1, 1, 8, 15, 12, 0, pytz.UTC)
+end = datetime(2018, 12, 31, 8, 15, 12, 0, pytz.UTC)
+perf = zipline.run_algorithm(
+    start = start, 
+    end=end, 
+    initialize=initialize, 
+    analyze=analyze,
+    capital_base=initial_portfolio, 
+    data_frequency = 'daily',
+    bundle= 'ac_equities_db'
+)
+
