@@ -1,3 +1,4 @@
+# Estrategia
 %matplotlib inline
 
 import zipline
